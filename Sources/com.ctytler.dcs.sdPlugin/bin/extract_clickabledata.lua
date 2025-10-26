@@ -21,6 +21,12 @@ function get_option_value(x)
 	return nil
 end
 
+-- Some modules call this to read aircraft properties; provide a safe stub that returns nil so
+-- modules can fall back to defaults when running in the extractor environment.
+function get_aircraft_property_or_nil(name)
+	return nil
+end
+
 -- Protect against relative path "dofile" calls by inspecting paths before running.
 -- All should use the configured "LockOn_Options.script_path" variable.
 call_dofile = dofile
@@ -143,28 +149,144 @@ end
 function load_module(module_name)
 	LockOn_Options = {}
 
+	-- Allow module_name to include a variant suffix separated by '|', e.g. "Mirage-F1|Mirage-F1\Mirage-F1BE".
+	local variant_subpath = nil
+	local base_module = module_name
+	-- Split module_name on literal '|' into base_module and variant_subpath
+	local sep = string.find(module_name, "|", 1, true)
+	if sep then
+		base_module = string.sub(module_name, 1, sep - 1)
+		variant_subpath = string.sub(module_name, sep + 1)
+	end
+
 	-- Specialty case handling for odd multi-version modules.
-	if string.match(module_name,"C-101") then
-		LockOn_Options.script_path = dcs_install_path..[[\Mods\aircraft\C-101\Cockpit\]]..module_name..[[\]]
-	elseif string.match(module_name,"L-39") then
-		L_39ZA = string.match(module_name, "L-39ZA")
+	if string.match(base_module, "C-101") then
+		LockOn_Options.script_path = dcs_install_path..[[\Mods\aircraft\C-101\Cockpit\]]..base_module..[[\]]
+	elseif string.match(base_module, "L-39") then
+		L_39ZA = string.match(base_module, "L-39ZA")
 		LockOn_Options.script_path = dcs_install_path..[[\Mods\aircraft\L-39C\Cockpit\]]
 		dofile(LockOn_Options.script_path.."devices.lua")
 	else
-		LockOn_Options.script_path = dcs_install_path..[[\Mods\aircraft\]]..module_name..[[\Cockpit\]]
+		LockOn_Options.script_path = dcs_install_path..[[\Mods\aircraft\]]..base_module..[[\Cockpit\]]
 	end
 	
-	script_to_run = loadfile(LockOn_Options.script_path.."clickabledata.lua")
-	if script_to_run == nil then
-		failed_script_path = LockOn_Options.script_path
-		LockOn_Options.script_path = LockOn_Options.script_path..[[Scripts\]]
-		script_to_run = loadfile(LockOn_Options.script_path.."clickabledata.lua")
-	  if script_to_run == nil then
-			error("Could not find clickabledata.lua from "..failed_script_path.." or "..LockOn_Options.script_path.." (or file found but contains syntax errors)", 2)
-		end
-	  end
 
-	  script_to_run()
+	-- Try several locations for clickabledata.lua: directly in Cockpit, in Cockpit/Scripts,
+	-- and in subdirectories (up to 2 levels deep) to support modules like Mirage-F1 which
+	-- place clickabledata in variant subfolders.
+	local tried_paths = {}
+	local function try_load(path)
+		tried_paths[#tried_paths + 1] = path
+		local f = loadfile(path)
+		if f ~= nil then
+			LockOn_Options.script_path = string.sub(path, 1, #path - string.len("clickabledata.lua"))
+			return f
+		end
+		return nil
+	end
+
+	-- 1) Directly under Cockpit\
+	-- If a variant subpath was provided (module_name contained '|'), try the variant first.
+	if variant_subpath ~= nil then
+		-- Try variant clickabledata direct and under Scripts
+		script_to_run = try_load(LockOn_Options.script_path .. variant_subpath .. [[\]] .. "clickabledata.lua")
+		if script_to_run == nil then
+			script_to_run = try_load(LockOn_Options.script_path .. variant_subpath .. [[\Scripts\]] .. "clickabledata.lua")
+		end
+		-- Also try one level deeper inside the variant subpath
+		if script_to_run == nil then
+			local function list_dir(path)
+				local entries = {}
+				local p = io.popen('dir "'..path..'" /b')
+				if p then
+					for name in p:lines() do
+						if name ~= '.' and name ~= '..' then
+							entries[#entries + 1] = name
+						end
+					end
+					p:close()
+				end
+				return entries
+			end
+			local base = LockOn_Options.script_path .. variant_subpath .. [[\]]
+			local subs = list_dir(base)
+			for _, sub in ipairs(subs) do
+				local subpath = base .. sub .. [[\]]
+				script_to_run = try_load(subpath .. "clickabledata.lua")
+				if script_to_run ~= nil then break end
+				script_to_run = try_load(subpath .. [[Scripts\]] .. "clickabledata.lua")
+				if script_to_run ~= nil then break end
+			end
+		end
+	end
+
+	-- 1) Directly under Cockpit\
+	if script_to_run == nil then
+		script_to_run = try_load(LockOn_Options.script_path.."clickabledata.lua")
+	end
+
+	-- 2) Under Cockpit\Scripts\
+	if script_to_run == nil then
+		script_to_run = try_load(LockOn_Options.script_path..[[Scripts\]].."clickabledata.lua")
+	end
+
+	-- 3) Search immediate subdirectories and their subdirectories (depth 2)
+	if script_to_run == nil then
+		-- Helper to iterate directory entries using Windows 'dir /b'
+		local function list_dir(path)
+			local entries = {}
+			local p = io.popen('dir "'..path..'" /b')
+			if p then
+				for name in p:lines() do
+					-- skip '.' and '..' entries
+					if name ~= '.' and name ~= '..' then
+						entries[#entries + 1] = name
+					end
+				end
+				p:close()
+			end
+			return entries
+		end
+
+		local subs = list_dir(LockOn_Options.script_path)
+		for _, sub in ipairs(subs) do
+			local subpath = LockOn_Options.script_path .. sub .. [[\]]
+			-- try clickabledata in first-level subdir
+			script_to_run = try_load(subpath .. "clickabledata.lua")
+			if script_to_run ~= nil then break end
+			-- try clickabledata in Scripts under first-level subdir
+			script_to_run = try_load(subpath .. [[Scripts\]] .. "clickabledata.lua")
+			if script_to_run ~= nil then break end
+			-- list second-level subdirs and try there
+			local subs2 = list_dir(subpath)
+			for _, sub2 in ipairs(subs2) do
+				local subpath2 = subpath .. sub2 .. [[\]]
+				script_to_run = try_load(subpath2 .. "clickabledata.lua")
+				if script_to_run ~= nil then break end
+				-- also try Scripts in second-level
+				script_to_run = try_load(subpath2 .. [[Scripts\]] .. "clickabledata.lua")
+				if script_to_run ~= nil then break end
+			end
+			if script_to_run ~= nil then break end
+		end
+	end
+
+	if script_to_run == nil then
+		local msg = "Could not find clickabledata.lua from "..LockOn_Options.script_path..". Tried paths:\n"
+		for _, p in ipairs(tried_paths) do
+			msg = msg .. "  " .. p .. "\n"
+		end
+		error(msg, 2)
+	end
+
+	-- Execute the discovered clickabledata script
+	-- Ensure common globals expected by module shared files exist in this environment.
+	-- Some modules expect _LAST_CLICK_SOUND_ to be defined (used by Common/sounds_common.lua).
+	if _G["_LAST_CLICK_SOUND_"] == nil then
+		_LAST_CLICK_SOUND_ = 0
+	end
+
+	script_to_run()
 	
 	element_list = collect_element_attributes(elements)
 	return element_list

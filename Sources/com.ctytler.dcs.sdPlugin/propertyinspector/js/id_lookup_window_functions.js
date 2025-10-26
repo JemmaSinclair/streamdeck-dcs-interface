@@ -57,7 +57,15 @@ function gotInstalledModules(installed_modules_list) {
     modified_modules_list = modifyInstalledModulesList(installed_modules_list);
     for (module of modified_modules_list) {
         var option = document.createElement('option');
-        option.appendChild(document.createTextNode(module));
+        var displayText = module;
+        // If module contains a '|' delimiter, it represents base|variant_subpath. Convert to a friendly label.
+        if (module.indexOf('|') >= 0) {
+            var parts = module.split('|');
+            var base = parts[0];
+            var variant = parts[1].replace(/\\/g, '/');
+            displayText = base + ' - ' + variant;
+        }
+        option.appendChild(document.createTextNode(displayText));
         option.value = module;
         select_elem.append(option);
     }

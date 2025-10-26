@@ -18,8 +18,78 @@ json get_installed_modules(const std::string &dcs_install_path, const std::strin
         for (const auto &dir : std::filesystem::directory_iterator(dcs_install_path + module_subdir)) {
             const std::string module_abs_path = dir.path().string();
             const auto mods_subdir_str_loc = module_abs_path.find(module_subdir);
-            installed_modules_and_result["installed_modules"].push_back(
-                module_abs_path.substr(mods_subdir_str_loc + module_subdir.size(), module_abs_path.size()));
+            // Determine the relative module path (relative to mods/aircraft/)
+            const std::string rel_module_path = module_abs_path.substr(mods_subdir_str_loc + module_subdir.size(),
+                                                                        module_abs_path.size());
+
+            // Try to detect if the module contains variants in its Cockpit folder (e.g. Mirage-F1\Mirage-F1BE)
+            // If so, add entries for each variant that contains a clickabledata.lua. Otherwise add the base module.
+            try {
+                std::filesystem::path cockpit_path = std::filesystem::path(module_abs_path) / "Cockpit";
+                bool added_variant = false;
+                if (std::filesystem::exists(cockpit_path) && std::filesystem::is_directory(cockpit_path)) {
+                    // If clickabledata exists directly under Cockpit or under Cockpit/Scripts,
+                    // prefer the base module entry (e.g., TF-51D) so the extractor searches the standard locations.
+                    std::filesystem::path direct_candidate = cockpit_path / "clickabledata.lua";
+                    std::filesystem::path scripts_candidate = cockpit_path / "Scripts" / "clickabledata.lua";
+                    if (std::filesystem::exists(direct_candidate) || std::filesystem::exists(scripts_candidate)) {
+                        installed_modules_and_result["installed_modules"].push_back(rel_module_path);
+                        added_variant = true;
+                    } else {
+                        // Otherwise, search for variant subfolders (exclude common folder names like "Scripts").
+                        for (const auto &sub : std::filesystem::directory_iterator(cockpit_path)) {
+                            if (!std::filesystem::is_directory(sub.path())) continue;
+                            const std::string subname = sub.path().filename().string();
+                            if (subname == "Scripts") continue; // not a variant
+
+                            // First check if clickabledata exists directly under this first-level subdir
+                            std::filesystem::path candidate1 = sub.path() / "clickabledata.lua";
+                            std::filesystem::path candidate2 = sub.path() / "Scripts" / "clickabledata.lua";
+                            if (std::filesystem::exists(candidate1) || std::filesystem::exists(candidate2)) {
+                                std::string variant_key = rel_module_path;
+                                if (variant_key.size() > 0 && (variant_key.back() == '/' || variant_key.back() == '\\')) {
+                                    variant_key.pop_back();
+                                }
+                                // Use '|' as internal delimiter between module and variant path
+                                variant_key += "|" + subname;
+                                installed_modules_and_result["installed_modules"].push_back(variant_key);
+                                added_variant = true;
+                                continue;
+                            }
+
+                            // Otherwise check one level deeper: sub/sub2
+                            if (std::filesystem::exists(sub.path()) && std::filesystem::is_directory(sub.path())) {
+                                for (const auto &sub2 : std::filesystem::directory_iterator(sub.path())) {
+                                    if (!std::filesystem::is_directory(sub2.path())) continue;
+                                    const std::string sub2name = sub2.path().filename().string();
+                                    if (sub2name == "Scripts") continue;
+                                    std::filesystem::path candidate21 = sub2.path() / "clickabledata.lua";
+                                    std::filesystem::path candidate22 = sub2.path() / "Scripts" / "clickabledata.lua";
+                                    if (std::filesystem::exists(candidate21) || std::filesystem::exists(candidate22)) {
+                                        std::string variant_key = rel_module_path;
+                                        if (variant_key.size() > 0 && (variant_key.back() == '/' || variant_key.back() == '\\')) {
+                                            variant_key.pop_back();
+                                        }
+                                        // Build variant subpath using backslashes (relative to Cockpit)
+                                        std::string variant_subpath = subname + "\\" + sub2name;
+                                        variant_key += "|" + variant_subpath;
+                                        installed_modules_and_result["installed_modules"].push_back(variant_key);
+                                        added_variant = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // If no clickabledata was found in Cockpit or variants, fall back to adding the base module
+                if (!added_variant) {
+                    installed_modules_and_result["installed_modules"].push_back(rel_module_path);
+                }
+            } catch (const std::exception &e) {
+                // On error, include the base module as a best-effort fallback
+                installed_modules_and_result["installed_modules"].push_back(
+                    module_abs_path.substr(mods_subdir_str_loc + module_subdir.size(), module_abs_path.size()));
+            }
         }
         installed_modules_and_result["result"] = "success";
     } else {
